@@ -1,0 +1,374 @@
+<?php
+// --- PHP Logic (Remain unchanged) ---
+require_once __DIR__ . '/../../includes/functions.php';
+require_once __DIR__ . '/../../includes/auth.php';
+require_once __DIR__ . '/../../includes/csrf.php';
+require_login();
+require_role('coordinator'); 
+
+$id = (int)($_GET['id'] ?? 0);
+$article = [ 
+    'id' => 0, 'title_en' => '', 'title_km' => '', 'slug' => '',
+    'body_en' => '', 'body_km' => '', 'tags' => '', 'is_published' => 1,
+    'thumbnail_path' => null 
+];
+$pageTitle = __t('add_article'); 
+
+if ($id > 0) {
+    $stmt = $pdo->prepare("SELECT * FROM kb_articles WHERE id = ?");
+    $stmt->execute([$id]);
+    $article_data = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($article_data) {
+        $article = array_merge($article, $article_data); 
+        $pageTitle = __t('edit_article') . ' #' . $id;
+    } else {
+        $_SESSION['flash_message'] = ['text' => __t('article_not_found'), 'type' => 'error'];
+        header('Location: ' . base_url('kb.php')); 
+        exit;
+    }
+}
+
+$notice = '';
+$notice_type = 'success';
+
+// Handle Form Submission (POST - Remain unchanged)
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    csrf_check();
+    $article_id = (int)($_POST['id'] ?? 0); 
+    $title_en = trim($_POST['title_en'] ?? '');
+    $title_km = trim($_POST['title_km'] ?? '');
+    $slug = trim($_POST['slug'] ?? '');
+    $body_en = trim($_POST['body_en'] ?? ''); 
+    $body_km = trim($_POST['body_km'] ?? '');
+    $tags = trim($_POST['tags'] ?? '');
+    $is_published = isset($_POST['is_published']) ? 1 : 0;
+    
+    // Get the current thumbnail path before potential update
+    $current_thumbnail_path_sql = $pdo->prepare("SELECT thumbnail_path FROM kb_articles WHERE id = ?");
+    $current_thumbnail_path_sql->execute([$article_id]);
+    $thumbnail_path = $current_thumbnail_path_sql->fetchColumn();
+    if($thumbnail_path === false) $thumbnail_path = null; // Handle case where article doesn't exist yet or has no thumb
+
+    // Basic Validation
+    if (empty($title_en) && empty($title_km)) {
+        $notice = __t('title_required_at_least_one');
+        $notice_type = 'error';
+        $article = $_POST; 
+        $article['id'] = $article_id;
+        $article['thumbnail_path'] = $thumbnail_path; // Keep existing path on validation error
+    } else {
+        try {
+             $pdo->beginTransaction(); 
+             $thumbnail_updated = false;
+             // --- Thumbnail Upload Logic (Remain unchanged) ---
+             if (isset($_FILES['thumbnail']) && $_FILES['thumbnail']['error'] === UPLOAD_ERR_OK) {
+                 $projectRoot = dirname(__DIR__, 2);
+                 $thumbDir = $projectRoot . '/public/uploads/kb_thumbnails'; 
+                 $relativePathPrefix = 'uploads/kb_thumbnails/';
+                 if (!is_dir($thumbDir)) @mkdir($thumbDir, 0777, true);
+                 if (!is_writable($thumbDir)) throw new Exception("Error: Thumbnail directory is not writable. Check permissions: " . $thumbDir);
+                 if ($_FILES['thumbnail']['size'] <= 2 * 1024 * 1024) { 
+                     $ext = strtolower(pathinfo($_FILES['thumbnail']['name'], PATHINFO_EXTENSION));
+                     if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp'])) {
+                         $fname = uniqid('kb_thumb_', true) . '.' . $ext;
+                         $destination = $thumbDir . '/' . $fname;
+                         if (move_uploaded_file($_FILES['thumbnail']['tmp_name'], $destination)) {
+                             $old_thumb_path = $thumbnail_path; // Use path fetched earlier
+                             if ($old_thumb_path && $relativePathPrefix . $fname !== $old_thumb_path && file_exists($projectRoot . '/public/' . $old_thumb_path)) {
+                                 @unlink($projectRoot . '/public/' . $old_thumb_path);
+                             }
+                             $thumbnail_path = $relativePathPrefix . $fname; 
+                             $thumbnail_updated = true;
+                         } else { throw new Exception(__t('error_uploading_thumbnail') . ' (Failed to move)'); }
+                     } else { throw new Exception(__t('invalid_thumbnail_file_type')); }
+                 } else { throw new Exception(__t('thumbnail_size_exceeded')); }
+             } elseif (isset($_FILES['thumbnail']) && $_FILES['thumbnail']['error'] !== UPLOAD_ERR_NO_FILE) {
+                  throw new Exception(__t('error_uploading_thumbnail') . ' (Code: ' . $_FILES['thumbnail']['error'] . ')');
+             }
+             // --- End Thumbnail Upload ---
+
+            // Generate slug (Remain unchanged)
+            if (empty($slug)) { $baseSlug = !empty($title_en) ? $title_en : $title_km; $slug = strtolower(trim(preg_replace('/[^A-Za-z0-9-]+/', '-', $baseSlug), '-')); } 
+            else { $slug = strtolower(trim(preg_replace('/[^a-z0-9-]+/', '-', $slug), '-')); }
+            $originalSlug = $slug; $counter = 1; $slugCheckSql = "SELECT COUNT(*) FROM kb_articles WHERE slug = ? AND id != ?"; $stmtCheck = $pdo->prepare($slugCheckSql); $stmtCheck->execute([$slug, $article_id]);
+            while ($stmtCheck->fetchColumn() > 0) { $slug = $originalSlug . '-' . $counter++; $stmtCheck->execute([$slug, $article_id]); }
+
+            // Save to Database (Remain unchanged)
+            if ($article_id > 0) { // Update
+                $sql = "UPDATE kb_articles SET title_en = ?, title_km = ?, slug = ?, body_en = ?, body_km = ?, tags = ?, is_published = ?, thumbnail_path = ? WHERE id = ?";
+                $params = [$title_en, $title_km, $slug, $body_en, $body_km, $tags, $is_published, $thumbnail_path, $article_id];
+                $pdo->prepare($sql)->execute($params);
+                $notice = __t('update_article_success');
+            } else { // Insert
+                $sql = "INSERT INTO kb_articles (title_en, title_km, slug, body_en, body_km, tags, is_published, thumbnail_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())";
+                $params = [$title_en, $title_km, $slug, $body_en, $body_km, $tags, $is_published, $thumbnail_path];
+                $pdo->prepare($sql)->execute($params);
+                $article_id = $pdo->lastInsertId(); 
+                $notice = __t('create_article_success');
+            }
+            $notice_type = 'success';
+            $pdo->commit(); 
+
+            $_SESSION['flash_message'] = ['text' => $notice, 'type' => $notice_type];
+            header('Location: ' . base_url('kb.php')); 
+            exit;
+
+        } catch (Exception $e) { 
+            $pdo->rollBack(); 
+            $notice = $e->getMessage(); 
+            $notice_type = 'error';
+            error_log("KB Save Error: " . $e->getMessage());
+            $article = $_POST; 
+            $article['id'] = $article_id;
+            // Preserve thumbnail path on error
+             $article['thumbnail_path'] = $thumbnail_path; // Use the path determined before the error
+        }
+    }
+}
+
+
+$lang = current_lang();
+$appName = $lang === 'km' ? $config['app']['name_km'] : $config['app']['name_en'];
+$currentUser = current_user();
+
+if (isset($_SESSION['flash_message'])) {
+    $notice = $_SESSION['flash_message']['text'];
+    $notice_type = $_SESSION['flash_message']['type'];
+    unset($_SESSION['flash_message']);
+}
+?>
+
+<!DOCTYPE html>
+<html lang="<?= e($lang) ?>">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><?= e($appName) ?> - <?= e($pageTitle) ?></title>
+	<link rel="icon" href="<?= base_url('assets/img/logo.png') ?>">
+    <!-- Scripts and Styles -->
+    <script> /* Theme Loader */ if(localStorage.theme==='dark'||(!('theme' in localStorage)&&window.matchMedia('(prefers-color-scheme: dark)').matches)){document.documentElement.classList.add('dark')}else{document.documentElement.classList.remove('dark')} </script>
+    <script> tailwind.config={darkMode:'class'} </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide-react@latest/dist/lucide-react.js"></script>
+    
+    <!-- ***** TinyMCE Script (Add your API key here) ***** -->
+    <!-- Get a free key from https://www.tiny.cloud/ -->
+    <script src="https://cdn.tiny.cloud/1/3pqu56zbf6sfhqitz1spgpz2snt79oug5jxe2ndvta6jtpvc/tinymce/7/tinymce.min.js" referrerpolicy="origin"></script>
+    <!-- Replace YOUR_API_KEY_HERE with your actual key -->
+
+    <style>
+        /* Styles (Remain unchanged) */
+        @import url('https://fonts.googleapis.com/css2?family=Kantumruy+Pro:wght@400;500;700&display=swap');
+        body { font-family: 'Kantumruy Pro', sans-serif; }
+        #digital-particles { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; }
+        ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #f1f5f9; } ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 10px; } ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        .dark ::-webkit-scrollbar-track { background: #1e293b; } .dark ::-webkit-scrollbar-thumb { background: #334155; } .dark ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        #toast-notification { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 100; opacity: 0; transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out; transform: translateY(100%); }
+        #toast-notification.show { opacity: 1; transform: translateY(0); }
+        .input-style { /* Applied via JS */ }
+         input[type="file"]::file-selector-button { margin-right: 1rem; padding: 0.5rem 1rem; border-radius: 0.5rem; border: 0; font-size: 0.875rem; font-weight: 600; background-color: #e0f2fe; color: #0369a1; cursor: pointer; transition: background-color 0.2s ease-in-out; }
+        input[type="file"]:hover::file-selector-button { background-color: #bae6fd; }
+        .dark input[type="file"]::file-selector-button { background-color: #334155; color: #7dd3fc; }
+        .dark input[type="file"]:hover::file-selector-button { background-color: #475569; }
+        html.dark .tox .tox-edit-area__iframe { background-color: #1e293b !important; } 
+        html.dark .tox .tox-editor-header { background-color: #334155 !important; border-bottom-color: #475569 !important; }
+        html.dark .tox .tox-toolbar, html.dark .tox .tox-toolbar__primary, html.dark .tox .tox-toolbar__overflow { background-color: #334155 !important; }
+        html.dark .tox .tox-tbtn, html.dark .tox .tox-tbtn svg { color: #cbd5e1 !important; fill: #cbd5e1 !important;}
+        html.dark .tox .tox-tbtn--enabled, html.dark .tox .tox-tbtn:hover { background-color: #475569 !important; }
+        html.dark .tox .tox-statusbar { background-color: #334155 !important; border-top-color: #475569 !important; color: #94a3b8 !important; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 dark:bg-slate-900 dark:text-gray-300 transition-colors duration-300">
+
+    <canvas id="digital-particles"></canvas>
+
+    <div class="flex flex-col min-h-screen">
+
+        <!-- ===== HEADER (Remain unchanged) ===== -->
+        <header class="sticky top-0 z-50 bg-white/80 dark:bg-slate-800/80 backdrop-blur-sm shadow-md dark:shadow-lg border-b border-gray-200 dark:border-transparent">
+             <nav class="container mx-auto px-4 py-3 flex justify-between items-center">
+                 <div class="flex items-center gap-6">
+                    <a href="<?= base_url('dashboard.php') ?>" class="flex items-center gap-2">
+                         <img src="<?= base_url(get_setting('site_logo', 'assets/img/logo_128x128.png')) ?>" alt="Logo" class="h-10 w-auto">
+                        <span class="text-xl font-bold text-gray-900 dark:text-white hidden sm:block"><?= e($appName) ?></span>
+                    </a>
+                    <div class="hidden md:flex items-center gap-4">
+                        <a href="<?= base_url('dashboard.php') ?>" class="text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white transition-colors duration-200 text-sm"><?= __t('dashboard') ?></a>
+                        <a href="<?= base_url('tickets.php') ?>" class="text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white transition-colors duration-200 text-sm"><?= __t('tickets') ?></a>
+                        <a href="<?= base_url('kb.php') ?>" class="text-white font-semibold bg-blue-600 px-3 py-1.5 rounded-lg text-sm"><?= __t('knowledge_base') ?></a>
+                        <a href="<?= base_url('reports.php') ?>" class="text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white transition-colors duration-200 text-sm"><?= __t('reports') ?></a>
+                        <?php if (is_role('admin')): ?>
+                        <a href="<?= base_url('admin/users.php') ?>" class="text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white transition-colors duration-200 text-sm"><?= __t('users') ?></a>
+                        <a href="<?= base_url('admin/settings.php') ?>" class="text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white transition-colors duration-200 text-sm"><?= __t('settings') ?></a>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                 <div class="flex items-center gap-4">
+                    <a href="?setlang=km" title="ភាសាខ្មែរ" class="rounded-full transition-all duration-300 <?= $lang === 'km' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white dark:ring-offset-slate-800' : 'opacity-60 hover:opacity-100' ?>">
+                        <img src="<?= base_url('assets/img/flag-km.png') ?>" alt="ភាសាខ្មែរ" class="w-6 h-6 rounded-full object-cover">
+                    </a>
+                    <a href="?setlang=en" title="English" class="rounded-full transition-all duration-300 <?= $lang === 'en' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white dark:ring-offset-slate-800' : 'opacity-60 hover:opacity-100' ?>">
+                        <img src="<?= base_url('assets/img/flag-en.png') ?>" alt="English" class="w-6 h-6 rounded-full object-cover">
+                    </a>
+                    <button id="theme-toggle" class="text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white">
+                        <svg id="theme-icon-sun" class="w-5 h-5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                        <svg id="theme-icon-moon" class="w-5 h-5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+                    </button>
+                    <div class="relative" id="profile-dropdown-menu">
+                        <button onclick="toggleDropdown('profile-dropdown')" class="flex items-center gap-2 text-gray-900 dark:text-white text-sm">
+                            <img src="<?= e($currentUser['avatar'] ? base_url($currentUser['avatar']) : base_url('assets/img/logo_128x128.png')) ?>" alt="Profile" class="w-8 h-8 rounded-full object-cover bg-gray-200 dark:bg-slate-700">
+                            <span class="hidden md:inline"><?= e($currentUser['name']) ?></span>
+                            <svg class="w-4 h-4 text-gray-400 hidden md:inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                        </button>
+                        <div id="profile-dropdown" class="hidden absolute right-0 mt-2 w-48 bg-white dark:bg-slate-700 dark:text-gray-200 rounded-lg shadow-xl py-1 z-50">
+                            <a href="<?= base_url('profile.php') ?>" class="block px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-slate-600"><?= __t('profile') ?></a>
+                            <a href="<?= base_url('logout.php') ?>" class="block px-4 py-2 text-sm text-red-600 hover:bg-gray-100 dark:hover:bg-slate-600"><?= __t('logout') ?></a>
+                        </div>
+                    </div>
+                </div>
+                 <button class="md:hidden text-gray-800 dark:text-white" onclick="toggleDropdown('mobile-menu')">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path></svg>
+                </button>
+            </nav>
+            <div id="mobile-menu" class="hidden md:hidden bg-white dark:bg-slate-700 px-4 pt-2 pb-4 space-y-2">
+                 <a href="<?= base_url('dashboard.php') ?>" class="block text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-lg transition-colors duration-200 text-sm"><?= __t('dashboard') ?></a>
+                <a href="<?= base_url('tickets.php') ?>" class="block text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-lg transition-colors duration-200 text-sm"><?= __t('tickets') ?></a>
+                <a href="<?= base_url('kb.php') ?>" class="block text-white font-semibold bg-blue-600 px-3 py-2 rounded-lg text-sm"><?= __t('knowledge_base') ?></a>
+                <a href="<?= base_url('reports.php') ?>" class="block text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-lg transition-colors duration-200 text-sm"><?= __t('reports') ?></a>
+                <?php if (is_role('admin')): ?>
+                <a href="<?= base_url('admin/users.php') ?>" class="block text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-lg transition-colors duration-200 text-sm"><?= __t('users') ?></a>
+                <a href="<?= base_url('admin/settings.php') ?>" class="block text-gray-600 hover:text-black dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-lg transition-colors duration-200 text-sm"><?= __t('settings') ?></a>
+                <?php endif; ?>
+            </div>
+        </header>
+
+        <!-- ===== MAIN CONTENT ===== -->
+        <main class="flex-grow container mx-auto px-4 py-8">
+
+            <div class="bg-white dark:bg-slate-800/80 backdrop-blur-sm p-6 md:p-8 rounded-2xl shadow-lg border border-gray-200 dark:border-slate-700/50 max-w-4xl mx-auto">
+
+                 <h1 class="text-2xl font-semibold text-gray-800 dark:text-white mb-6 border-b border-gray-200 dark:border-slate-700 pb-4"><?= e($pageTitle) ?></h1>
+
+                 <!-- Display Flash Message or Error from POST -->
+                 <?php if($notice): ?>
+                    <div class="<?= $notice_type === 'success' ? 'bg-green-100 border-green-400 text-green-700 dark:bg-green-900/50 dark:border-green-600 dark:text-green-300' : 'bg-red-100 border-red-400 text-red-700 dark:bg-red-900/50 dark:border-red-600 dark:text-red-300' ?> border px-4 py-3 rounded-lg relative mb-6" role="alert">
+                        <span class="block sm:inline"><?= e($notice) ?></span>
+                    </div>
+                 <?php endif; ?>
+
+                <form method="post" enctype="multipart/form-data" class="space-y-6"> 
+                    <?php csrf_field(); ?>
+                    <input type="hidden" name="id" value="<?= (int)$article['id'] ?>">
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label for="title_en" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Title (English) <span class="text-gray-400 dark:text-gray-500 text-xs">(<?= __t('required_if_kh_empty') ?>)</span></label>
+                            <input type="text" id="title_en" name="title_en" value="<?= e($article['title_en']) ?>" class="w-full input-style">
+                        </div>
+                        <div>
+                            <label for="title_km" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Title (Khmer) <span class="text-gray-400 dark:text-gray-500 text-xs">(<?= __t('required_if_en_empty') ?>)</span></label>
+                            <input type="text" id="title_km" name="title_km" value="<?= e($article['title_km']) ?>" class="w-full input-style">
+                        </div>
+                    </div>
+
+                    <div>
+                         <label for="slug" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Slug <span class="text-gray-400 dark:text-gray-500 text-xs">(<?= __t('auto_generated_if_empty') ?>)</span></label>
+                        <input type="text" id="slug" name="slug" value="<?= e($article['slug']) ?>" pattern="[a-z0-9-]+" placeholder="e.g., how-to-reset-password" class="w-full input-style">
+                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400"><?= __t('slug_format_hint') ?></p>
+                    </div>
+
+                     <!-- Thumbnail Upload -->
+                     <div>
+                        <label for="thumbnail" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"><?= __t('thumbnail_image') ?></label>
+                         <?php if(!empty($article['thumbnail_path'])): ?>
+                         <div class="flex items-center gap-4 mb-2 p-2 bg-gray-50 dark:bg-slate-700 rounded border border-gray-200 dark:border-slate-600">
+                             <img src="<?= e(base_url($article['thumbnail_path'])) ?>?t=<?= time() ?>" alt="Current Thumbnail" class="h-16 w-auto max-w-[150px] object-contain bg-white dark:bg-gray-200 p-1 rounded">
+                             <span class="text-xs text-gray-500 dark:text-gray-400 break-all"><?= e($article['thumbnail_path']) ?></span>
+                         </div>
+                         <?php endif; ?>
+                        <input type="file" id="thumbnail" name="thumbnail" accept="image/jpeg, image/png, image/gif, image/webp"
+                               class="w-full text-sm text-gray-500 dark:text-gray-400 cursor-pointer bg-gray-50 dark:bg-slate-700 border border-gray-300 dark:border-slate-600 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500">
+                         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400"><?= __t('thumbnail_upload_note') ?></p>
+                    </div>
+
+                    <div>
+                        <label for="body_en" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Body (English)</label>
+                        <textarea id="body_en" name="body_en" class="tinymce-editor" placeholder="<?= __t('content_in_english') ?>..."><?= e($article['body_en']) ?></textarea>
+                    </div>
+
+                     <div>
+                        <label for="body_km" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Body (Khmer)</label>
+                        <textarea id="body_km" name="body_km" class="tinymce-editor" placeholder="<?= __t('content_in_khmer') ?>..."><?= e($article['body_km']) ?></textarea>
+                    </div>
+
+                    <div>
+                         <label for="tags" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"><?= __t('tags') ?></label>
+                        <input type="text" id="tags" name="tags" value="<?= e($article['tags']) ?>" placeholder="<?= __t('tags_placeholder') ?>" class="w-full input-style">
+                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400"><?= __t('tags_hint') ?></p>
+                    </div>
+
+                    <div class="flex items-center">
+                        <input id="is_published" name="is_published" type="checkbox" value="1" <?= $article['is_published'] ? 'checked' : '' ?> class="h-4 w-4 text-blue-600 border-gray-300 rounded dark:bg-slate-700 dark:border-slate-600 focus:ring-blue-500">
+                        <label for="is_published" class="ml-2 block text-sm text-gray-900 dark:text-gray-300">
+                           <?= __t('published') ?>
+                        </label>
+                    </div>
+
+
+                    <div class="flex justify-end gap-4 pt-6 border-t border-gray-200 dark:border-slate-700">
+                        <a href="<?= base_url('kb.php') ?>" class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg shadow-sm hover:bg-gray-200 dark:bg-slate-600 dark:text-gray-200 dark:hover:bg-slate-500 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 dark:focus:ring-offset-slate-800">
+                            <?= __t('cancel') ?>
+                        </a>
+                        <button type="submit" class="px-6 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-slate-800">
+                            <?= $id > 0 ? __t('update') : __t('create') ?>
+                        </button>
+                    </div>
+                </form>
+
+            </div>
+        </main>
+
+        <!-- ===== FOOTER (Remain unchanged) ===== -->
+        <footer class="bg-white dark:bg-slate-800/80 mt-12 py-4 border-t border-gray-200 dark:border-transparent">
+             <div class="container mx-auto px-4 text-center text-gray-500 dark:text-gray-400 text-sm">
+                 © <?= date('Y') ?> - <?= e($appName) ?> / <?= e(__t('Digital System Management Department')) ?>
+             </div>
+         </footer>
+    </div>
+
+     <!-- ===== Toast Notification Placeholder (Remain unchanged) ===== -->
+     <div id="toast-notification" class="hidden max-w-xs p-4 text-gray-500 bg-white rounded-lg shadow dark:text-gray-400 dark:bg-gray-800" role="alert"> ... </div>
+
+
+    <!-- ===== JAVASCRIPT ===== -->
+    <script> /* Digital Particle Script (Remain unchanged) */
+        const canvas = document.getElementById('digital-particles'); /* ... */ animate(); </script>
+    <script> /* Dropdown & Theme Toggle Script (Remain unchanged) */
+        function toggleDropdown(id) { /* ... */ } /* ... */ themeToggle.addEventListener('click', () => { /* ... */ }); </script>
+    <script> /* Toast Notification Script (Remain unchanged) */
+        const toastElement = document.getElementById('toast-notification'); /* ... */
+        <?php if($notice && $_SERVER['REQUEST_METHOD'] !== 'POST'): ?> showToast('<?= e($notice) ?>', '<?= e($notice_type) ?>'); <?php endif; ?>
+         /* Apply Input Styles */ document.addEventListener('DOMContentLoaded', () => { /* ... */ });
+    </script>
+    <script> /* Slug Generation Script (Remain unchanged) */
+        const titleEnInput = document.getElementById('title_en'); /* ... */
+    </script>
+    
+    <!-- TinyMCE Initialization Script (Remain unchanged) -->
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+         const isDarkMode = document.documentElement.classList.contains('dark');
+         tinymce.init({
+            selector: 'textarea.tinymce-editor',
+            // ... (TinyMCE config remains the same) ...
+             skin: isDarkMode ? 'oxide-dark' : 'oxide',
+             content_css: isDarkMode ? 'dark' : 'default',
+             // ... (Rest of TinyMCE init) ...
+         });
+      });
+    </script>
+
+
+</body>
+</html>
+

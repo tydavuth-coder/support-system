@@ -1,0 +1,1 @@
+$(function(){$(document).on('click','.confirm-delete',function(e){if(!confirm($(this).data('msg')||'Confirm delete?')) e.preventDefault();});});

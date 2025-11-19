@@ -1,0 +1,39 @@
+<?php require_once __DIR__ . '/../../includes/functions.php'; require_once __DIR__ . '/../../includes/auth.php'; require_once __DIR__ . '/../../includes/csrf.php'; require_login(); require_role('admin'); require_once __DIR__ . '/../../includes/header.php';
+$notice='';
+if($_SERVER['REQUEST_METHOD']==='POST'){ csrf_check(); $action=$_POST['action']??'';
+  if($action==='create'||$action==='update'){ $id=(int)($_POST['id']??0); $slug=trim($_POST['slug']??''); if(!$slug) $slug=strtolower(preg_replace('/[^a-z0-9\-]+/i','-', $_POST['title_en'] ?? 'kb'));
+    $title_en=trim($_POST['title_en']??''); $title_km=trim($_POST['title_km']??''); $body_en=$_POST['body_en']??''; $body_km=$_POST['body_km']??''; $tags=trim($_POST['tags']??''); $is_published=(int)($_POST['is_published']??1);
+    if($action==='create'){ $pdo->prepare("INSERT INTO kb_articles(slug,title_en,title_km,body_en,body_km,tags,is_published,created_at) VALUES(?,?,?,?,?,?,?,NOW())")->execute([$slug,$title_en,$title_km,$body_en,$body_km,$tags,$is_published]); $notice=__t('create'); }
+    else { $pdo->prepare("UPDATE kb_articles SET slug=?, title_en=?, title_km=?, body_en=?, body_km=?, tags=?, is_published=? WHERE id=?")->execute([$slug,$title_en,$title_km,$body_en,$body_km,$tags,$is_published,$id]); $notice=__t('update'); }
+  } elseif($action==='delete'){ $id=(int)($_POST['id']??0); $pdo->prepare("DELETE FROM kb_articles WHERE id=?")->execute([$id]); $notice=__t('delete'); }
+}
+$q=trim($_GET['q']??''); $w="1=1"; $p=[]; if($q){ $w.=" AND (title_en LIKE ? OR title_km LIKE ? OR tags LIKE ?)"; $p=['%'.$q.'%','%'.$q.'%','%'.$q.'%']; }
+$list=$pdo->prepare("SELECT * FROM kb_articles WHERE $w ORDER BY created_at DESC"); $list->execute($p); $rows=$list->fetchAll();
+$editId=(int)($_GET['edit']??0); $edit=null; if($editId){ $s=$pdo->prepare("SELECT * FROM kb_articles WHERE id=?"); $s->execute([$editId]); $edit=$s->fetch(); }
+?>
+<div class="card p-3">
+  <h5>KB Admin</h5>
+  <?php if($notice): ?><div class="alert alert-success"><?= e($notice) ?></div><?php endif; ?>
+  <form method="get" class="d-flex gap-2 mb-3"><input class="form-control" name="q" placeholder="<?= __t('search') ?>" value="<?= e($q) ?>"><button class="btn btn-outline-primary btn-sm"><?= __t('search') ?></button><a class="btn btn-success btn-sm" href="?edit=0">+ New</a></form>
+  <?php if($edit!==null || isset($_GET['edit'])): ?>
+  <div class="card p-3">
+    <form method="post"><?php csrf_field(); ?><input type="hidden" name="action" value="<?= $edit?'update':'create' ?>"><input type="hidden" name="id" value="<?= (int)($edit['id']??0) ?>">
+      <div class="row g-2"><div class="col-md-6"><label class="form-label">Slug</label><input class="form-control" name="slug" value="<?= e($edit['slug']??'') ?>"></div><div class="col-md-6"><label class="form-label">Tags</label><input class="form-control" name="tags" value="<?= e($edit['tags']??'') ?>"></div></div>
+      <div class="row g-2 mt-1"><div class="col-md-6"><label class="form-label">Title (EN)</label><input class="form-control" name="title_en" value="<?= e($edit['title_en']??'') ?>"></div><div class="col-md-6"><label class="form-label">ចំណងជើង (KM)</label><input class="form-control" name="title_km" value="<?= e($edit['title_km']??'') ?>"></div></div>
+      <label class="form-label mt-2">Body (EN)</label><textarea class="form-control" name="body_en" rows="5"><?= e($edit['body_en']??'') ?></textarea>
+      <label class="form-label mt-2">មាតិកា (KM)</label><textarea class="form-control" name="body_km" rows="5"><?= e($edit['body_km']??'') ?></textarea>
+      <label class="form-label mt-2">Publish?</label><select class="form-select" name="is_published"><option value="1" <?= (($edit['is_published']??1)==1)?'selected':'' ?>>Yes</option><option value="0" <?= (($edit['is_published']??1)==0)?'selected':'' ?>>No</option></select>
+      <div class="mt-3 d-flex justify-content-end gap-2"><a class="btn btn-secondary" href="kb.php">Close</a><button class="btn btn-primary"><?= __t('save') ?></button></div>
+    </form>
+  </div>
+  <?php endif; ?>
+  <div class="table-responsive mt-3"><table class="table table-hover align-middle"><thead><tr><th>ID</th><th>Title (EN)</th><th>ចំណងជើង (KM)</th><th>Tags</th><th>Published</th><th>Created</th><th><?= __t('actions') ?></th></tr></thead><tbody>
+    <?php foreach($rows as $r): ?><tr><td><?= (int)$r['id'] ?></td><td><?= e($r['title_en']) ?></td><td><?= e($r['title_km']) ?></td><td><?= e($r['tags']) ?></td><td><?= $r['is_published']?'Yes':'No' ?></td><td><?= e($r['created_at']) ?></td>
+      <td class="d-flex gap-2"><a class="btn btn-sm btn-outline-primary" href="?edit=<?= (int)$r['id'] ?>"><?= __t('edit') ?></a>
+        <form method="post" onsubmit="return confirm('Delete this article?')"><?php csrf_field(); ?><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn btn-sm btn-outline-danger"><?= __t('delete') ?></button></form>
+      </td></tr><?php endforeach; ?>
+  </tbody></table></div>
+</div>
+<script src="https://cdn.tiny.cloud/1/no-api-key/tinymce/6/tinymce.min.js" referrerpolicy="origin"></script>
+<script>tinymce.init({ selector:'textarea[name=body_en],textarea[name=body_km]', height: 300, menubar:false, plugins:'lists link table code', toolbar:'undo redo | bold italic underline | bullist numlist | link table | code' });</script>
+<?php require_once __DIR__ . '/../../includes/footer.php'; ?>
